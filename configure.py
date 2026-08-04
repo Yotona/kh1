@@ -3,6 +3,7 @@
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Set, Union
@@ -15,14 +16,12 @@ from splat.segtypes.linker_entry import LinkerEntry
 ROOT = Path(__file__).parent.resolve()
 TOOLS_DIR = ROOT / "tools"
 
-VERSION = "jp"
-BASENAME = "SLPS_251.05"
-YAML_FILE = f"config/kh.{VERSION}.yaml"
+VERSIONS = {
+    "jp": ("SLPS_251.05", "Original Japanese"),
+    "fm": ("SLPS_251.98", "Final Mix"),
+}
 
-LD_PATH = f"{BASENAME}.ld"
-ELF_PATH = f"build/{VERSION}/{BASENAME}"
-MAP_PATH = f"build/{VERSION}/{BASENAME}.map"
-PRE_ELF_PATH = f"build/{VERSION}/{BASENAME}.elf"
+CROSS = "mips-linux-gnu-"
 
 COMMON_INCLUDES = "-Iinclude -isystem include/sdk/ee -isystem include/gcc"
 
@@ -42,12 +41,58 @@ NO_G_FILES = [
 ]
 
 
-def clean():
+class Paths:
+    def __init__(self, version: str):
+        basename, _ = VERSIONS[version]
+
+        self.version = version
+        self.basename = basename
+        self.target_elf = basename
+        self.target_rom = f"{basename}.rom"
+        self.yaml = f"config/kh.{version}.yaml"
+        self.ld_script = f"{basename}.ld"
+        self.config_dir = f"config/{version}"
+        self.build_dir = f"build/{version}"
+        self.elf = f"{self.build_dir}/{basename}.elf"
+        self.map = f"{self.build_dir}/{basename}.map"
+        self.rom = f"{self.build_dir}/{basename}.rom"
+        self.checksum = f"{self.config_dir}/checksum.sha1"
+
+
+def clean(paths: Paths):
     if os.path.exists(".splache"):
         os.remove(".splache")
+    for generated in (paths.ld_script, f"{paths.basename}.d"):
+        if os.path.exists(generated):
+            os.remove(generated)
     shutil.rmtree("asm", ignore_errors=True)
     shutil.rmtree("assets", ignore_errors=True)
     shutil.rmtree("build", ignore_errors=True)
+
+
+def extract_rom(paths: Paths):
+    elf = ROOT / paths.target_elf
+    rom = ROOT / paths.target_rom
+
+    if not elf.is_file():
+        sys.exit(
+            f"Could not find {paths.target_elf}. Place the {VERSIONS[paths.version][1]} "
+            "executable, ripped from the disc, in the root of the repository."
+        )
+
+    subprocess.run(
+        [
+            f"{CROSS}objcopy",
+            "-O",
+            "binary",
+            "--gap-fill=0x00",
+            "-R",
+            ".reginfo",
+            str(elf),
+            str(rom),
+        ],
+        check=True,
+    )
 
 
 def write_permuter_settings():
@@ -65,7 +110,17 @@ compiler_type = "gcc"
         )
 
 
-def build_stuff(linker_entries: List[LinkerEntry]):
+def asm_dependencies(paths: Paths, src_path: Path) -> List[str]:
+    dep_file = Path(paths.build_dir) / src_path.with_suffix(".asmproc.d")
+    if not dep_file.is_file():
+        return []
+
+    rule = dep_file.read_text().replace("\\\n", " ").split("\n")[0]
+    _, _, deps = rule.partition(":")
+    return deps.split()
+
+
+def build_stuff(paths: Paths, linker_entries: List[LinkerEntry]):
     built_objects: Set[Path] = set()
 
     def build(
@@ -73,6 +128,7 @@ def build_stuff(linker_entries: List[LinkerEntry]):
         src_paths: List[Path],
         task: str,
         variables: Dict[str, str] = {},
+        implicit: List[str] = [],
         implicit_outputs: List[str] = [],
     ):
         if not isinstance(object_paths, list):
@@ -88,40 +144,48 @@ def build_stuff(linker_entries: List[LinkerEntry]):
                 rule=task,
                 inputs=[str(s) for s in src_paths],
                 variables=variables,
+                implicit=implicit,
                 implicit_outputs=implicit_outputs,
             )
 
     ninja = ninja_syntax.Writer(open(str(ROOT / "build.ninja"), "w"), width=9999)
 
     # Rules
-    cross = "mips-linux-gnu-"
-
-    config = f"config/{VERSION}"
-
-    ld_args = f"-EL -T {config}/undefined_syms.txt -T {config}/undefined_syms_auto.txt -T {config}/undefined_funcs_auto.txt -Map $mapfile -T $in -o $out"
+    ld_args = " ".join(
+        [
+            "-EL",
+            f"-T {paths.config_dir}/undefined_syms.txt",
+            f"-T {paths.config_dir}/undefined_syms_auto.txt",
+            f"-T {paths.config_dir}/undefined_funcs_auto.txt",
+            "-T linker_script_extra.ld",
+            "-Map $mapfile",
+            "-T $in",
+            "-o $out",
+        ]
+    )
 
     ninja.rule(
         "as",
         description="as $in",
-        command=f"cpp {COMMON_INCLUDES} $in -o  - | {cross}as -no-pad-sections -EL -march=5900 -mabi=eabi -Iinclude -o $out",
+        command=f"cpp {COMMON_INCLUDES} $in -o  - | {CROSS}as -no-pad-sections -EL -march=5900 -mabi=eabi -Iinclude -o $out",
     )
 
     ninja.rule(
         "cc",
         description="cc $in",
-        command=f"{GAME_COMPILE_CMD} -o $out && {cross}strip $out -N dummy-symbol-name",
+        command=f"{GAME_COMPILE_CMD} -o $out && {CROSS}strip $out -N dummy-symbol-name",
     )
 
     ninja.rule(
         "libcc",
         description="cc $in",
-        command=f"{LIB_COMPILE_CMD} $in -o $out && {cross}strip $out -N dummy-symbol-name",
+        command=f"{LIB_COMPILE_CMD} $in -o $out && {CROSS}strip $out -N dummy-symbol-name",
     )
 
     ninja.rule(
         "ld",
         description="link $out",
-        command=f"{cross}ld {ld_args}",
+        command=f"{CROSS}ld {ld_args}",
     )
 
     ninja.rule(
@@ -131,9 +195,9 @@ def build_stuff(linker_entries: List[LinkerEntry]):
     )
 
     ninja.rule(
-        "elf",
-        description="elf $out",
-        command=f"{cross}objcopy $in $out -O binary",
+        "rom",
+        description="rom $out",
+        command=f"{CROSS}objcopy $in $out -O binary --gap-fill=0x00",
     )
 
     for entry in linker_entries:
@@ -150,16 +214,23 @@ def build_stuff(linker_entries: List[LinkerEntry]):
         ):
             build(entry.object_path, entry.src_paths, "as")
         elif isinstance(seg, splat.segtypes.common.c.CommonSegC):
+            implicit = asm_dependencies(paths, entry.src_paths[0])
             if any(
                 str(src_path).startswith("src/lib/") for src_path in entry.src_paths
             ):
-                build(entry.object_path, entry.src_paths, "libcc")
+                build(entry.object_path, entry.src_paths, "libcc", implicit=implicit)
             else:
                 if entry.src_paths[0].name in NO_G_FILES:
                     g = ""
                 else:
                     g = "-g"
-                build(entry.object_path, entry.src_paths, "cc", variables={"g": g})
+                build(
+                    entry.object_path,
+                    entry.src_paths,
+                    "cc",
+                    variables={"g": g},
+                    implicit=implicit,
+                )
         elif isinstance(seg, splat.segtypes.common.databin.CommonSegDatabin):
             build(entry.object_path, entry.src_paths, "as")
         else:
@@ -167,25 +238,27 @@ def build_stuff(linker_entries: List[LinkerEntry]):
             sys.exit(1)
 
     ninja.build(
-        PRE_ELF_PATH,
+        paths.elf,
         "ld",
-        LD_PATH,
+        paths.ld_script,
         implicit=[str(obj) for obj in built_objects],
-        variables={"mapfile": MAP_PATH},
+        variables={"mapfile": paths.map},
     )
 
     ninja.build(
-        ELF_PATH,
-        "elf",
-        PRE_ELF_PATH,
+        paths.rom,
+        "rom",
+        paths.elf,
     )
 
     ninja.build(
-        ELF_PATH + ".ok",
+        paths.rom + ".ok",
         "sha1sum",
-        f"config/{VERSION}/checksum.sha1",
-        implicit=[ELF_PATH],
+        paths.checksum,
+        implicit=[paths.rom],
     )
+
+    ninja.default(paths.rom + ".ok")
 
 
 if __name__ == "__main__":
@@ -194,7 +267,8 @@ if __name__ == "__main__":
         "-v",
         "--version",
         help="Game version to configure for",
-        choices=["jp", "fm"],
+        choices=list(VERSIONS),
+        default="jp",
     )
     parser.add_argument(
         "-c",
@@ -204,39 +278,20 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.version:
-        VERSION = args.version
-    else:
-        VERSION = "jp"
-
-    BASENAME = {
-        "jp": "SLPS_251.05",
-        "fm": "SLPS_251.98",
-    }[VERSION]
-
-    LD_PATH = f"{BASENAME}.ld"
-    ELF_PATH = f"build/{VERSION}/{BASENAME}"
-    MAP_PATH = f"build/{VERSION}/{BASENAME}.map"
-    PRE_ELF_PATH = f"build/{VERSION}/{BASENAME}.elf"
+    paths = Paths(args.version)
 
     if args.clean:
-        clean()
-
-    EXTENDEDNAME = {
-        "jp": "Original Japanese",
-        "fm": "Final Mix",
-    }[VERSION]
+        clean(paths)
 
     print(
-        f"Kingdom Hearts De:Compiled ~ Generating build configuration for {EXTENDEDNAME} edition ({BASENAME})"
+        f"Kingdom Hearts De:Compiled ~ Generating build configuration for "
+        f"{VERSIONS[args.version][1]} edition ({paths.basename})"
     )
 
-    YAML_FILE = f"config/kh.{VERSION}.yaml"
+    extract_rom(paths)
 
-    split.main([YAML_FILE], modes="all", verbose=False)
+    split.main([Path(paths.yaml)], modes="all", verbose=False)
 
-    linker_entries = split.linker_writer.entries
-
-    build_stuff(linker_entries)
+    build_stuff(paths, split.linker_writer.entries)
 
     write_permuter_settings()
