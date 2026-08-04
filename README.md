@@ -9,15 +9,6 @@ A decompilation of the Playstation 2 releases of Kingdom Hearts.
 | Original Japanese        | `SLPS_251.05` |`9dabbf867a7ec2a030df99ba1ed969f2deef0488`|
 | Final Mix (JP Exclusive) | `SLPS_251.98` |`e70bda789916142aafb53d85cef2e806b35ad8d8`|
 
-splat is pointed at a flat image of the elf's code and data rather than at the
-elf itself. `configure.py` extracts one with `objcopy`, and that image is what
-the build is checksummed against:
-
-| Game Version             | ROM               | Sha1                                     |
-|--------------------------|-------------------|------------------------------------------|
-| Original Japanese        | `SLPS_251.05.rom` |`cb85dbab6c05667ed11d94e94abfa079baaf12c2`|
-| Final Mix (JP Exclusive) | `SLPS_251.98.rom` |`b62bf252fdaf0b1a726668e28c244e1d83bcb146`|
-
 ---
 
 ### Dependencies
@@ -36,7 +27,7 @@ A `mips-linux-gnu` binutils toolchain (`objcopy`, `as`, `ld`) and `ninja` are al
    - You can clear existing configurations with the `--clean`/`-c` flag
    - eg: `./configure.py -c -v fm` will clear the existing build configuration and generate a new one for the Final Mix version.
 
-3. Run `ninja` to build the project. Final output will be stored by version in the `build` directory. A build that matches ends with `build/<version>/<basename>.rom: OK`.
+3. Run `ninja` to build the project. Final output will be stored by version in the `build` directory.
 
 ---
 
