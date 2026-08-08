@@ -170,7 +170,21 @@ def build_stuff(paths: Paths, linker_entries: List[LinkerEntry]):
     ninja.rule(
         "as",
         description="as $in",
-        command=f"cpp {COMMON_INCLUDES} $in -o  - | {CROSS}as -no-pad-sections -EL -march=5900 -mabi=eabi -Iinclude -o $out",
+        command=(
+            "sed -e 's/\\x24ACC/ACC/g' -e 's/\\x24Q/Q/g' -e 's/\\x24R/R/g' "
+            "-e 's/^jlabel func_/glabel func_/' $in | "
+            f"{GAME_AS_CMD} -Iinclude/ee-as -Iinclude -o $out && "
+            f"{CROSS}strip $out -N dummy-symbol-name"
+        ),
+    )
+
+    ninja.rule(
+        "hasm",
+        description="as $in",
+        command=(
+            f"{CROSS}as -no-pad-sections -EL -march=5900 -mabi=eabi "
+            f"-Iinclude/cross-as -Iinclude -o $out $in"
+        ),
     )
 
     ninja.rule(
@@ -215,7 +229,13 @@ def build_stuff(paths: Paths, linker_entries: List[LinkerEntry]):
         if isinstance(seg, splat.segtypes.common.asm.CommonSegAsm) or isinstance(
             seg, splat.segtypes.common.data.CommonSegData
         ):
-            build(entry.object_path, entry.src_paths, "as")
+            if str(entry.src_paths[0]).startswith("src/"):
+                rule = "hasm"
+                implicit = ["include/cross-as/macro.inc", "include/macro.inc"]
+            else:
+                rule = "as"
+                implicit = ["include/ee-as/macro.inc", "include/labels.inc"]
+            build(entry.object_path, entry.src_paths, rule, implicit=implicit)
         elif isinstance(seg, splat.segtypes.common.c.CommonSegC):
             implicit = asm_dependencies(paths, entry.src_paths[0])
             if any(
